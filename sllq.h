@@ -46,6 +46,7 @@
 #define SLLQ_EAGAIN         7
 #define SLLQ_EMPTY          8
 #define SLLQ_FULL           9
+#define SLLQ_NENOUGH        10
 
 #ifdef __cplusplus
 extern "C" {
@@ -96,6 +97,7 @@ int sllq_destroy(sllq_t* queue);
 int sllq_flush(sllq_t* queue, sllq_item_callback_t callback);
 int sllq_push(sllq_t* queue, void* data, const struct timespec* abstime);
 int sllq_shift(sllq_t* queue, void** data, const struct timespec* abstime);
+int sllq_nshift(sllq_t* queue, void** data, size_t ndata, const struct timespec* abstime);
 
 #ifdef __cplusplus
 }

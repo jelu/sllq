@@ -377,3 +377,153 @@ int sllq_shift(sllq_t* queue, void** data, const struct timespec* abstime) {
 
     return ret;
 }
+
+int sllq_nshift(sllq_t* queue, void** data, size_t ndata, const struct timespec* abstime) {
+    int err, ret = SLLQ_EMPTY;
+    sllq_item_t* item;
+
+    sllq_assert(queue);
+    if (!queue) {
+        return SLLQ_EINVAL;
+    }
+    sllq_assert(data);
+    if (!data) {
+        return SLLQ_EINVAL;
+    }
+    sllq_assert(ndata);
+    if (!ndata) {
+        return SLLQ_EINVAL;
+    }
+    sllq_assert(queue->item);
+    if (!queue->item) {
+        return SLLQ_EINVAL;
+    }
+
+    item = &(queue->item[queue->read]);
+    if ((err = pthread_mutex_trylock(&(item->mutex)))) {
+        if (err == EBUSY)
+            return SLLQ_EAGAIN;
+        errno = err;
+        return SLLQ_ERRNO;
+    }
+
+    if (abstime) {
+        while (!item->have_data) {
+            if (item->want_read) {
+                pthread_mutex_unlock(&(item->mutex));
+                return SLLQ_EINVAL;
+            }
+            if (item->want_write) {
+                if ((err = pthread_cond_signal(&(item->cond)))) {
+                    pthread_mutex_unlock(&(item->mutex));
+                    errno = err;
+                    return SLLQ_ERRNO;
+                }
+            }
+
+            item->want_read = 1;
+            err = pthread_cond_timedwait(&(item->cond), &(item->mutex), abstime);
+            item->want_read = 0;
+
+            if (err) {
+                pthread_mutex_unlock(&(item->mutex));
+                if (err == ETIMEDOUT) {
+                    return SLLQ_ETIMEDOUT;
+                }
+                errno = err;
+                return SLLQ_ERRNO;
+            }
+        }
+    }
+
+    if (item->have_data) {
+        sllq_item_t* nitem = &(queue->item[(queue->read + ndata) & queue->mask]);
+        size_t n;
+
+        if ((err = pthread_mutex_trylock(&(nitem->mutex)))) {
+            if (err == EBUSY) {
+                pthread_mutex_unlock(&(item->mutex));
+                return SLLQ_EAGAIN;
+            }
+            pthread_mutex_unlock(&(item->mutex));
+            errno = err;
+            return SLLQ_ERRNO;
+        }
+
+        if (abstime) {
+            while (!nitem->have_data) {
+                if (nitem->want_read) {
+                    pthread_mutex_unlock(&(nitem->mutex));
+                    pthread_mutex_unlock(&(item->mutex));
+                    return SLLQ_EINVAL;
+                }
+                if (nitem->want_write) {
+                    if ((err = pthread_cond_signal(&(nitem->cond)))) {
+                        pthread_mutex_unlock(&(nitem->mutex));
+                        pthread_mutex_unlock(&(item->mutex));
+                        errno = err;
+                        return SLLQ_ERRNO;
+                    }
+                }
+
+                nitem->want_read = 1;
+                err = pthread_cond_timedwait(&(nitem->cond), &(nitem->mutex), abstime);
+                nitem->want_read = 0;
+
+                if (err) {
+                    pthread_mutex_unlock(&(nitem->mutex));
+                    pthread_mutex_unlock(&(item->mutex));
+                    if (err == ETIMEDOUT) {
+                        return SLLQ_ETIMEDOUT;
+                    }
+                    errno = err;
+                    return SLLQ_ERRNO;
+                }
+            }
+        }
+
+        if (!nitem->have_data) {
+            if ((err = pthread_mutex_unlock(&(nitem->mutex)))) {
+                pthread_mutex_unlock(&(item->mutex));
+                errno = err;
+                return SLLQ_ERRNO;
+            }
+            if ((err = pthread_mutex_unlock(&(item->mutex)))) {
+                errno = err;
+                return SLLQ_ERRNO;
+            }
+            return SLLQ_NENOUGH;
+        }
+
+        for (n = 0; n < ndata; n++) {
+            sllq_item_t* ritem = &(queue->item[queue->read]);
+
+            data[n] = ritem->data;
+            ritem->data = 0;
+            ritem->have_data = 0;
+
+            queue->read++;
+            queue->read &= queue->mask;
+        }
+
+        if (item->want_write) {
+            /* TODO: How to handle errors? We did a successful shift */
+            pthread_cond_signal(&(item->cond));
+        }
+
+        ret = SLLQ_OK;
+
+        if ((err = pthread_mutex_unlock(&(nitem->mutex)))) {
+            pthread_mutex_unlock(&(item->mutex));
+            errno = err;
+            return SLLQ_ERRNO;
+        }
+    }
+
+    if ((err = pthread_mutex_unlock(&(item->mutex)))) {
+        errno = err;
+        return SLLQ_ERRNO;
+    }
+
+    return ret;
+}
